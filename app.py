@@ -5,6 +5,7 @@ from datetime import datetime
 import os
 import re
 import json
+import csv
 
 # ========== HELPERS ==========
 
@@ -13,32 +14,48 @@ def is_valid_email(email):
     return re.match(pattern, email)
 
 def save_user_local(email, info_dict):
-    """שומר כל דאטה שנכנס לרשימת JSON מרכזית"""
+    """שומר כל דאטה גם ב־JSON וגם ב־CSV במבנה מסודר, מגן מבאגים."""
+    # JSON
     os.makedirs('user_data', exist_ok=True)
-    file_path = "user_data/all_feedbacks.json"
+    json_path = "user_data/all_feedbacks.json"
     record = {
         "email": email,
         **info_dict,
         "timestamp": datetime.now().isoformat()
     }
+    # CSV
+    os.makedirs('feedbacks', exist_ok=True)
+    csv_path = "feedbacks/all_feedbacks.csv"
+    csv_fields = sorted(record.keys())  # כל השדות במבנה קבוע
+
     try:
-        # טען את הדאטה הקיים (אם קיים)
-        if os.path.exists(file_path):
-            with open(file_path, 'r', encoding='utf-8') as f:
+        # ========== JSON ==========
+        if os.path.exists(json_path):
+            with open(json_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if not isinstance(data, list):
                     data = []
         else:
             data = []
-        # הוסף את הרשומה החדשה
         data.append(record)
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"[DEBUG] Saved user data locally: {file_path}")
+        print(f"[DEBUG] Saved user data locally: {json_path}")
+
+        # ========== CSV ==========
+        file_exists = os.path.exists(csv_path)
+        with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=csv_fields)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(record)
+        print(f"[DEBUG] Saved user data locally: {csv_path}")
+
     except Exception as e:
         print(f"[ERROR] Could not save data: {e}")
 
 def professional_tips(lufs, peak, crest, centroid, dominant_freq):
+    # כמו אצלך...
     tips = []
     main_tip = ""
     explanation = []
