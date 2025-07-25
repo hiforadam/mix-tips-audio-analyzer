@@ -1,0 +1,5 @@
+streamlit
+soundfile
+numpy
+gspread
+oauth2client
