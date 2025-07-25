@@ -1,0 +1,6 @@
+user_data/
+uploads/
+*.pyc
+__pycache__/
+venv/
+.DS_Store

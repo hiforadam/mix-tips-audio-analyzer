@@ -5,57 +5,105 @@ from datetime import datetime
 import os
 import re
 import json
-import csv
+import hashlib
+from pathlib import Path
+import tempfile
+
+# ========== PATHS ==========
+APP_ROOT = Path(__file__).parent.resolve()
+USER_DATA_DIR = APP_ROOT / "user_data"
+UPLOADS_DIR = APP_ROOT / "uploads"
+USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+JSON_PATH = USER_DATA_DIR / "all_feedbacks.json"
 
 # ========== HELPERS ==========
 
-def is_valid_email(email):
+def is_valid_email(email: str) -> bool:
     pattern = r"^[\w\.-]+@[\w\.-]+\.\w+$"
-    return re.match(pattern, email)
+    return re.match(pattern, email) is not None
 
-def save_user_local(email, info_dict):
-    """שומר כל דאטה גם ב־JSON וגם ב־CSV במבנה מסודר, מגן מבאגים."""
-    # JSON
-    os.makedirs('user_data', exist_ok=True)
-    json_path = "user_data/all_feedbacks.json"
-    record = {
-        "email": email,
-        **info_dict,
-        "timestamp": datetime.now().isoformat()
-    }
-    # CSV
-    os.makedirs('feedbacks', exist_ok=True)
-    csv_path = "feedbacks/all_feedbacks.csv"
-    csv_fields = sorted(record.keys())  # כל השדות במבנה קבוע
+def safe_filename(s: str) -> str:
+    s = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', s)
+    return s[:64]
 
-    try:
-        # ========== JSON ==========
-        if os.path.exists(json_path):
-            with open(json_path, 'r', encoding='utf-8') as f:
+def _load_records() -> list:
+    if JSON_PATH.exists() and JSON_PATH.stat().st_size > 0:
+        try:
+            with JSON_PATH.open('r', encoding='utf-8') as f:
                 data = json.load(f)
-                if not isinstance(data, list):
-                    data = []
-        else:
-            data = []
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return []
+
+def _write_records(data: list) -> None:
+    with JSON_PATH.open('w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def compute_file_hash(file_path: Path) -> str:
+    """SHA1 קצר עבור זיהוי תוכן (10 תווים)"""
+    h = hashlib.sha1()
+    with open(file_path, 'rb') as f:
+        while True:
+            chunk = f.read(8192)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()[:10]
+
+def find_record_index(email: str, file_hash: str) -> int | None:
+    data = _load_records()
+    for i, rec in enumerate(data):
+        if rec.get("email") == email and rec.get("file_hash") == file_hash:
+            return i
+    return None
+
+def get_next_project_number(email: str) -> int:
+    """מספר הפרויקט הבא עבור משתמש לפי מה ששמור ב-JSON."""
+    data = _load_records()
+    max_n = 0
+    for rec in data:
+        if rec.get("email") == email:
+            fname = rec.get("filename", "")
+            m = re.search(r'__project_(\d+)\.', fname)
+            if m:
+                n = int(m.group(1))
+                if n > max_n:
+                    max_n = n
+    return max_n + 1
+
+def build_project_filename(email: str, project_num: int, ext: str) -> Path:
+    email_part = safe_filename(email.split("@")[0]) if email else "anon"
+    return UPLOADS_DIR / f"{email_part}__project_{project_num}{ext}"
+
+def save_or_update_record(email: str, record: dict) -> None:
+    """מעדכן רשומה קיימת לפי (email + file_hash) או יוצר חדשה אם אין."""
+    data = _load_records()
+    idx = None
+    fh = record.get("file_hash")
+    if fh:
+        for i, rec in enumerate(data):
+            if rec.get("email") == email and rec.get("file_hash") == fh:
+                idx = i
+                break
+
+    now_iso = datetime.now().isoformat()
+    if idx is None:
+        record["created_at"] = now_iso
+        record["updated_at"] = now_iso
         data.append(record)
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"[DEBUG] Saved user data locally: {json_path}")
+    else:
+        # עדכון במקום—לא יוצרים רשומה כפולה
+        data[idx].update(record)
+        data[idx]["updated_at"] = now_iso
 
-        # ========== CSV ==========
-        file_exists = os.path.exists(csv_path)
-        with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=csv_fields)
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(record)
-        print(f"[DEBUG] Saved user data locally: {csv_path}")
+    _write_records(data)
 
-    except Exception as e:
-        print(f"[ERROR] Could not save data: {e}")
-
+# ========== PROFESSIONAL TIPS ==========
 def professional_tips(lufs, peak, crest, centroid, dominant_freq):
-    # כמו אצלך...
     tips = []
     main_tip = ""
     explanation = []
@@ -114,7 +162,6 @@ def professional_tips(lufs, peak, crest, centroid, dominant_freq):
 
     if not main_tip:
         main_tip = "Your mix is balanced and excellent! Keep it up."
-
     return main_tip, tips, explanation
 
 # ========== UI & LOGIC ==========
@@ -147,60 +194,80 @@ if not st.session_state['email_ok']:
         if is_valid_email(email):
             st.session_state['email_ok'] = True
             st.session_state['user_email'] = email
-            save_user_local(email, {'timestamp': datetime.now().isoformat()})
+            # רישום "פתיחת סשן" מינימלי
+            save_or_update_record(email, {"email": email})
             st.success("Email received – you may continue!")
         else:
             st.error("Please enter a valid email address.")
     if not st.session_state['email_ok']:
         st.stop()
 
+# שדות דאטה איכותית
 uploaded_file = st.file_uploader("Upload audio file (WAV/MP3)", type=["wav", "mp3"])
+genre = st.text_input("Genre (optional, e.g., Pop, Rock, Trap, Techno, etc.)")
+project_stage = st.selectbox("שלב הפרויקט:", ["דמו", "מיקס", "מאסטר", "בדיקת רפרנס", "סופי", "אחר"])
 
 if uploaded_file:
     try:
         st.info("🔎 Analysis may take a few seconds. Please wait...")
-        os.makedirs('uploads', exist_ok=True)
-        filename = f"uploads/{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}"
-        with open(filename, "wb") as f:
+
+        email = st.session_state.get('user_email', 'anon')
+        ext = Path(uploaded_file.name).suffix.lower()
+        tmp = UPLOADS_DIR / f"__tmp{ext}"
+        with open(tmp, "wb") as f:
             f.write(uploaded_file.read())
-        data, samplerate = sf.read(filename)
-        if data.ndim > 1:
-            data = np.mean(data, axis=1)
-        duration = len(data) / samplerate
-        rms = np.sqrt(np.mean(data**2))
-        peak = np.max(np.abs(data))
-        crest_factor = peak / (rms + 1e-9)
-        lufs = 20 * np.log10(rms + 1e-9)
-        spectrum = np.abs(np.fft.rfft(data))
-        freqs = np.fft.rfftfreq(len(data), 1/samplerate)
-        centroid = np.sum(freqs * spectrum) / np.sum(spectrum)
-        dominant_freq = freqs[np.argmax(spectrum)]
 
-        st.markdown(
-            f"<div dir='ltr' style='text-align:left; background:#f4f4f5; color:#232323; padding:10px; border-radius:12px; margin-bottom:16px; font-size:1.01em'>"
-            f"✅ File loaded successfully: <b>{uploaded_file.name}</b> | Size: <b>{uploaded_file.size/1024/1024:.1f}MB</b> | Duration: <b>{duration:.1f} seconds</b>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
+        file_hash = compute_file_hash(tmp)
 
+        # האם יש כבר רשומה עבור אותו תוכן?
+        idx = find_record_index(email, file_hash)
+        data = _load_records()
+
+        if idx is not None:
+            # יש רשומה קודמת – משתמשים באותו שם קובץ, מחליפים תוכן
+            existing_filename = data[idx].get("filename")
+            if existing_filename:
+                final_path = UPLOADS_DIR / existing_filename
+            else:
+                # אם משום מה חסר, בונים שם לפי מס' הפרויקט הבא (fallback)
+                n = get_next_project_number(email)
+                final_path = build_project_filename(email, n, ext)
+        else:
+            # אין רשומה – פרויקט חדש עם מספור עוקב
+            n = get_next_project_number(email)
+            final_path = build_project_filename(email, n, ext)
+
+        # מחליפים/יוצרים את הקובץ הסופי בלי שכפולים
+        os.replace(tmp, final_path)
+
+        # ניתוח
+        data_arr, samplerate = sf.read(final_path)
+        if data_arr.ndim > 1:
+            data_arr = np.mean(data_arr, axis=1)
+        duration = len(data_arr) / samplerate
+        rms = float(np.sqrt(np.mean(data_arr**2)))
+        peak = float(np.max(np.abs(data_arr)))
+        crest_factor = float(peak / (rms + 1e-12))
+        lufs = float(20 * np.log10(rms + 1e-12))
+        spectrum = np.abs(np.fft.rfft(data_arr))
+        freqs = np.fft.rfftfreq(len(data_arr), 1/samplerate)
+        centroid = float(np.sum(freqs * spectrum) / (np.sum(spectrum) + 1e-12))
+        dominant_freq = float(freqs[np.argmax(spectrum)])
+
+        # מציגים רק את התוכן החשוב (ללא הודעת "File loaded successfully")
         main_tip, tips, explanation = professional_tips(lufs, peak, crest_factor, centroid, dominant_freq)
-
         st.markdown(
             f"<div dir='ltr' style='text-align:left; background:#fefce8; color:#bb8504; padding:17px; border-radius:16px; margin-top:13px; font-size:1.18em; font-weight:bold; border:2px solid #fde68a;'>"
             f"{main_tip}"
             f"</div>",
             unsafe_allow_html=True
         )
-
         st.markdown("<div dir='ltr' style='text-align:left; font-size:1.13em; margin-top:13px; color:#111'><b>Professional Recommendations for this Mix:</b></div>", unsafe_allow_html=True)
         tips_html = "<div dir='ltr' style='text-align:left; font-size: 1.09em; background:#fff; color:#232323; padding:11px 8px 2px 0; border-radius:9px; margin-bottom:13px;'>"
         for tip in tips:
             tips_html += f"• {tip}<br>"
         tips_html += "</div>"
         st.markdown(tips_html, unsafe_allow_html=True)
-
-        st.markdown("<div dir='ltr' style='text-align:left; font-size:1.05em; margin-top:8px; color:#8a593a; background:#f6e9d7; border-radius:7px; padding:7px 12px 7px 0;'><b>Detailed explanation for each parameter:</b><br>"
-            + "<br>".join(explanation) + "</div>", unsafe_allow_html=True)
 
         with st.expander("📋 Summary for copy/share:"):
             summary = f"""<div dir='ltr' style='text-align:left; font-family:inherit; color:#222; background:#f8fafc; padding:12px; border-radius:10px'>
@@ -210,6 +277,8 @@ Peak: {peak:.2f}<br>
 Crest Factor: {crest_factor:.2f}<br>
 Dominant Frequency: {dominant_freq:.0f}Hz<br>
 Centroid: {centroid:.0f}Hz<br>
+Genre: {genre}<br>
+Project Stage: {project_stage}<br>
 <br>
 <b>Main Tip:</b><br>
 {main_tip}<br>
@@ -220,9 +289,11 @@ Centroid: {centroid:.0f}Hz<br>
 """
             st.markdown(summary, unsafe_allow_html=True)
 
-        # Save user info immediately (even without feedback)
-        user_info = {
-            'filename': filename,
+        # נשמור/נעדכן את הרשומה (ללא CSV)
+        record = {
+            'email': email,
+            'file_hash': file_hash,
+            'filename': final_path.name,
             'duration': duration,
             'lufs': lufs,
             'peak': peak,
@@ -231,12 +302,18 @@ Centroid: {centroid:.0f}Hz<br>
             'dominant_freq': dominant_freq,
             'main_tip': main_tip,
             'tips': "; ".join(tips),
-            'timestamp': datetime.now().isoformat()
+            'genre': genre,
+            'project_stage': project_stage,
         }
-        save_user_local(st.session_state['user_email'], user_info)
+        save_or_update_record(email, record)
+
+        # נחזיק מזהים בסשן כדי ש-"Submit feedback" יעדכן את אותה רשומה
+        st.session_state["current_file_hash"] = file_hash
+        st.session_state["current_filename"] = final_path.name
 
         st.markdown("<div dir='ltr' style='text-align:left; color:#166534; font-size:1.06em; margin-bottom:7px; margin-top:20px;'>Your feedback will improve the system!</div>", unsafe_allow_html=True)
 
+        # --- FEEDBACK ---
         feedback_purpose = st.selectbox(
             "Why did you create/upload this file?",
             ["Just checking", "Submit to client", "Streaming upload", "Demo phase", "Professional consultation", "Contest/Prize", "Other (please specify)"]
@@ -260,7 +337,11 @@ Centroid: {centroid:.0f}Hz<br>
         q3 = st.text_area("Any comments/requests – help us improve!", height=100)
 
         if st.button("Submit feedback"):
-            user_info.update({
+            # עדכון אותה רשומה – לא יצירת חדשה
+            update_payload = {
+                'email': email,
+                'file_hash': st.session_state.get("current_file_hash"),
+                'filename': st.session_state.get("current_filename"),
                 'feedback_purpose': feedback_purpose,
                 'feedback_purpose_free': feedback_purpose_free,
                 'self_rating': self_rating,
@@ -270,10 +351,9 @@ Centroid: {centroid:.0f}Hz<br>
                 'q1': q1,
                 'q2': q2,
                 'q3': q3,
-                'timestamp': datetime.now().isoformat()
-            })
-            save_user_local(st.session_state['user_email'], user_info)
-            st.success("Thank you for your feedback! Want to analyze another file? Refresh the page or upload a new file.")
+            }
+            save_or_update_record(email, update_payload)
+            st.success("Thank you for your feedback! (Record updated, not duplicated).")
 
     except Exception as e:
         st.error(f"⚠️ Error: Unsupported or corrupted file ({e})")
